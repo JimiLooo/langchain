@@ -1,11 +1,10 @@
 import 'dotenv/config';
 import readline from 'node:readline';
 import { stdin as input, stdout as output } from 'node:process';
-
+import { ProxyAgent } from 'undici';
 import { ChatOpenAI } from '@langchain/openai';
 import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
-import { HttpsProxyAgent } from 'https-proxy-agent';
 
 function parseNumber(value: string | undefined, fallback: number): number {
 	if (value === undefined) return fallback;
@@ -39,7 +38,7 @@ async function main() {
 		console.log('[debug] temperature:', temperature, 'timeoutMs:', timeoutMs);
 	}
 
-	const proxyAgent = new HttpsProxyAgent(proxyUrl);
+	const proxyAgent = new ProxyAgent(proxyUrl);
 	const proxyFetch: typeof globalThis.fetch = (url, init) =>
 		fetch(url, { ...init, dispatcher: proxyAgent as any });
 
@@ -50,8 +49,8 @@ async function main() {
 		timeout: timeoutMs,
 		configuration: {
 			baseURL,
-			fetch: proxyFetch,
-		},
+			fetch: proxyFetch
+		}
 	});
 
 	const prompt = ChatPromptTemplate.fromMessages([
