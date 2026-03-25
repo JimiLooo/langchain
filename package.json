@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "dev:xai": "tsx src/xai-chat.ts",
+    "dev:agent": "tsx agent.mts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },
@@ -14,15 +14,13 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@ai-sdk/xai": "^3.0.74",
+    "@langchain/community": "^1.1.25",
     "@langchain/core": "^1.1.36",
+    "@langchain/langgraph": "^1.2.5",
     "@langchain/openai": "^1.3.1",
-    "ai": "^6.0.138",
     "dotenv": "^17.3.1",
-    "https-proxy-agent": "^8.0.0",
     "langchain": "^1.2.37",
-    "undici": "^7.24.5",
-    "zod": "^4.3.6"
+    "undici": "^7.24.5"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

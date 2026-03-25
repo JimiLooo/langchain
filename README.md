@@ -58,3 +58,20 @@ pnpm dev
 ## 代码入口
 
 - 主程序：`src/index.ts`
+- Agent 示例：`agent.mts`
+
+## 4. LangSmith 追踪（可选但推荐）
+
+在 `.env` 中补充：
+
+- `LANGSMITH_API_KEY`
+- `LANGSMITH_TRACING=true`
+- `LANGSMITH_PROJECT=my-langchain-chatbot`
+
+然后运行 Agent：
+
+```bash
+pnpm dev:agent
+```
+
+运行后可以在 LangSmith 控制台看到每次调用的 trace（模型调用、工具调用、耗时等）。

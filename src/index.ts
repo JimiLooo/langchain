@@ -2,9 +2,12 @@ import 'dotenv/config';
 import readline from 'node:readline';
 import { stdin as input, stdout as output } from 'node:process';
 import { ProxyAgent } from 'undici';
+import { TavilySearchAPIRetriever } from '@langchain/community/retrievers/tavily_search_api';
+import { tool } from '@langchain/core/tools';
 import { ChatOpenAI } from '@langchain/openai';
-import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts';
-import { HumanMessage, AIMessage } from '@langchain/core/messages';
+import { MemorySaver } from '@langchain/langgraph';
+import { HumanMessage } from '@langchain/core/messages';
+import { createAgent } from 'langchain';
 
 function parseNumber(value: string | undefined, fallback: number): number {
 	if (value === undefined) return fallback;
@@ -22,27 +25,30 @@ async function main() {
 	const apiKey = process.env.API_KEY;
 	const modelName = process.env.MODEL ?? 'grok-4-1-fast';
 	const baseURL = process.env.BASE_URL;
-	const proxyUrl = 'http://127.0.0.1:7897';
-
-	let llm: ChatOpenAI;
+	const proxyUrl = process.env.PROXY_URL ?? 'http://127.0.0.1:7897';
+	let threadId = process.env.THREAD_ID ?? '42';
 
 	if (!apiKey) {
 		console.error('缺少 API_KEY，请先在 .env 填入。');
 		throw new Error('Missing API_KEY');
 	}
+	if (!process.env.TAVILY_API_KEY) {
+		console.error('缺少 TAVILY_API_KEY，请先在 .env 填入。');
+		throw new Error('Missing TAVILY_API_KEY');
+	}
 
 	if (debug) {
-		console.log('[debug] apiKey:', apiKey);
 		console.log('[debug] baseURL:', baseURL);
 		console.log('[debug] model:', modelName);
 		console.log('[debug] temperature:', temperature, 'timeoutMs:', timeoutMs);
+		console.log('[debug] proxy:', proxyUrl);
 	}
 
 	const proxyAgent = new ProxyAgent(proxyUrl);
 	const proxyFetch: typeof globalThis.fetch = (url, init) =>
 		fetch(url, { ...init, dispatcher: proxyAgent as any });
 
-	llm = new ChatOpenAI({
+	const llm = new ChatOpenAI({
 		apiKey,
 		model: modelName,
 		temperature,
@@ -53,18 +59,28 @@ async function main() {
 		}
 	});
 
-	const prompt = ChatPromptTemplate.fromMessages([
-		['system', '你是一个简洁、友好且尽量准确的中文聊天助手。'],
-		new MessagesPlaceholder('history'),
-		['human', '{input}']
-	]);
+	const tavilyRetriever = new TavilySearchAPIRetriever({
+		apiKey: process.env.TAVILY_API_KEY,
+		k: 3
+	});
+	const tavilySearchTool = tool(
+		async (query: string) => {
+			const docs = await tavilyRetriever.invoke(query);
+			return docs.map((doc, idx) => `[${idx + 1}] ${doc.pageContent}`).join('\n\n');
+		},
+		{
+			name: 'tavily_search',
+			description: 'Search the web for recent factual information.'
+		}
+	);
+	const agent = createAgent({
+		model: llm,
+		tools: [tavilySearchTool],
+		checkpointer: new MemorySaver(),
+		systemPrompt: '你是一个AV女演员风格，你的任务是和用户进行聊天，你要帮助用户解决问题，满足用户提出的需求'
+	});
 
-	// LCEL 管道：Prompt -> Model
-	const chain = prompt.pipe(llm) as any;
-
-	let history: Array<HumanMessage | AIMessage> = [];
-
-	console.log('简单聊天机器人已启动（输入 /clear 清空历史，/exit 退出）。');
+	console.log('聊天机器人（已启用 Tavily 搜索）已启动（输入 /clear 清空历史，/exit 退出）。');
 
 	const ask = (q: string) =>
 		new Promise<string>((resolve) => {
@@ -77,7 +93,7 @@ async function main() {
 		if (!userText) continue;
 		if (userText === '/exit') break;
 		if (userText === '/clear') {
-			history = [];
+			threadId = `${Date.now()}`;
 			console.log('已清空历史。');
 			continue;
 		}
@@ -85,12 +101,12 @@ async function main() {
 		try {
 			console.log('正在请求模型（可能需要几秒...）');
 
-			// 把历史消息作为上下文一起传给 prompt
-			const aiMessage = (await chain.invoke({ input: userText, history })) as AIMessage;
+			const agentState = await agent.invoke(
+				{ messages: [new HumanMessage(userText)] },
+				{ configurable: { thread_id: threadId } }
+			);
+			const aiMessage = agentState.messages[agentState.messages.length - 1];
 			const content = aiMessage.content ?? String(aiMessage);
-
-			history.push(new HumanMessage(userText));
-			history.push(aiMessage);
 
 			console.log('助手：', content);
 		} catch (err) {
