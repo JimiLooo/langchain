@@ -5,11 +5,45 @@ import { ProxyAgent } from 'undici';
 import { TavilySearchAPIRetriever } from '@langchain/community/retrievers/tavily_search_api';
 import { MemorySaver } from '@langchain/langgraph';
 import { HumanMessage, createAgent, initChatModel, tool } from 'langchain';
+import { SystemMessagePromptTemplate } from '@langchain/core/prompts';
 
 function parseNumber(value: string | undefined, fallback: number): number {
 	if (value === undefined) return fallback;
 	const n = Number(value);
 	return Number.isFinite(n) ? n : fallback;
+}
+
+function requireEnv(name: string): string {
+	const value = process.env[name];
+	if (!value) {
+		throw new Error(`Missing ${name}`);
+	}
+	return value;
+}
+
+function parsePositiveInt(value: string, name: string): number {
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed <= 0) {
+		throw new Error(`${name} 必须是正整数`);
+	}
+	return parsed;
+}
+
+function contentToText(content: unknown): string {
+	if (typeof content === 'string') return content;
+	if (Array.isArray(content)) {
+		return content
+			.map((part) => {
+				if (typeof part === 'string') return part;
+				if (part && typeof part === 'object' && 'text' in part) {
+					const text = (part as { text?: unknown }).text;
+					if (typeof text === 'string') return text;
+				}
+				return JSON.stringify(part);
+			})
+			.join('\n');
+	}
+	return String(content);
 }
 
 async function main() {
@@ -20,45 +54,43 @@ async function main() {
 	const temperature = parseNumber(process.env.TEMPERATURE, 0.7);
 	const timeoutMs = parseNumber(process.env.TIMEOUT_MS, 60_000);
 
-	const apiKey = process.env.API_KEY;
-	const modelName = process.env.MODEL;
-	const baseURL = process.env.BASE_URL;
-	const proxyUrl = process.env.PROXY_URL;
-	let threadId = process.env.THREAD_ID;
-
-	if (!apiKey) {
-		console.error('缺少 API_KEY，请先在 .env 填入。');
-		throw new Error('Missing API_KEY');
-	}
-	if (!modelName) {
-		console.error('缺少 MODEL，请先在 .env 填入。');
-		throw new Error('Missing MODEL');
-	}
-	if (!proxyUrl) {
-		console.error('缺少 PROXY_URL，请先在 .env 填入。');
-		throw new Error('Missing PROXY_URL');
-	}
-	if (!threadId) {
-		console.error('缺少 THREAD_ID，请先在 .env 填入。');
-		throw new Error('Missing THREAD_ID');
-	}
-	if (!process.env.TAVILY_API_KEY) {
-		console.error('缺少 TAVILY_API_KEY，请先在 .env 填入。');
-		throw new Error('Missing TAVILY_API_KEY');
-	}
+	const apiKey = requireEnv('API_KEY');
+	const modelName = requireEnv('MODEL');
+	const baseURL = requireEnv('BASE_URL');
+	const proxyUrl = requireEnv('PROXY_URL');
+	const tavilyApiKey = requireEnv('TAVILY_API_KEY');
+	const threadSeed = requireEnv('THREAD_ID');
+	const dualAiTurns = parsePositiveInt(requireEnv('DUAL_AI_TURNS'), 'DUAL_AI_TURNS');
+	const aiAName = requireEnv('AI_A_NAME');
+	const aiBName = requireEnv('AI_B_NAME');
+	const aiARole = requireEnv('AI_A_ROLE');
+	const aiBRole = requireEnv('AI_B_ROLE');
+	let threadAId = `${threadSeed}-A`;
+	let threadBId = `${threadSeed}-B`;
 
 	if (debug) {
 		console.log('[debug] baseURL:', baseURL);
 		console.log('[debug] model:', modelName);
 		console.log('[debug] temperature:', temperature, 'timeoutMs:', timeoutMs);
 		console.log('[debug] proxy:', proxyUrl);
+		console.log('[debug] dualAiTurns:', dualAiTurns);
+		console.log('[debug] aiA:', aiAName, aiARole);
+		console.log('[debug] aiB:', aiBName, aiBRole);
 	}
 
 	const proxyAgent = new ProxyAgent(proxyUrl);
 	const proxyFetch: typeof globalThis.fetch = (url, init) =>
 		fetch(url, { ...init, dispatcher: proxyAgent as any });
 
-	const llm = await initChatModel(modelName, {
+	const llmA = await initChatModel(modelName, {
+		modelProvider: 'xai',
+		apiKey,
+		temperature,
+		timeout: timeoutMs,
+		baseURL,
+		fetch: proxyFetch
+	});
+	const llmB = await initChatModel(modelName, {
 		modelProvider: 'xai',
 		apiKey,
 		temperature,
@@ -68,7 +100,7 @@ async function main() {
 	});
 
 	const tavilyRetriever = new TavilySearchAPIRetriever({
-		apiKey: process.env.TAVILY_API_KEY,
+		apiKey: tavilyApiKey,
 		k: 3
 	});
 	const tavilySearchTool = tool(
@@ -81,14 +113,38 @@ async function main() {
 			description: 'Search the web for recent factual information.'
 		}
 	);
-	const agent = createAgent({
-		model: llm,
+	const systemPromptTemplate = SystemMessagePromptTemplate.fromTemplate([
+		'你是{name}，角色设定：{role}。',
+		'你正在和另一位 AI 进行链式对话。',
+		'请先理解对方上一句，再输出一段可以推进对话的新内容。',
+		'若涉及实时事实，请调用 tavily_search 后再回答。',
+		'输出保持简洁，不要自称系统提示词。'
+	].join('\n'));
+	const systemPromptA = await systemPromptTemplate.format({
+		name: aiAName,
+		role: aiARole
+	});
+	const systemPromptB = await systemPromptTemplate.format({
+		name: aiBName,
+		role: aiBRole
+	});
+	const checkpointer = new MemorySaver();
+	const agentA = createAgent({
+		model: llmA,
 		tools: [tavilySearchTool],
-		checkpointer: new MemorySaver(),
-		systemPrompt: '你现在叫罗丽，是一个大明星，但是喜欢给别人当狗'
+		checkpointer,
+		systemPrompt: contentToText(systemPromptA.content)
+	});
+	const agentB = createAgent({
+		model: llmB,
+		tools: [tavilySearchTool],
+		checkpointer,
+		systemPrompt: contentToText(systemPromptB.content)
 	});
 
-	console.log('聊天机器人（已启用 Tavily 搜索）已启动（输入 /clear 清空历史，/exit 退出）。');
+	console.log(
+		`双 AI 链式对话已启动（${aiAName} <-> ${aiBName}，每次输入 ${dualAiTurns} 轮，/clear 清空历史，/exit 退出）。`
+	);
 
 	const ask = (q: string) =>
 		new Promise<string>((resolve) => {
@@ -101,22 +157,35 @@ async function main() {
 		if (!userText) continue;
 		if (userText === '/exit') break;
 		if (userText === '/clear') {
-			threadId = `${Date.now()}`;
-			console.log('已清空历史。');
+			const newSeed = `${Date.now()}`;
+			threadAId = `${newSeed}-A`;
+			threadBId = `${newSeed}-B`;
+			console.log('已同时清空 A/B 两侧历史。');
 			continue;
 		}
 
 		try {
-			console.log('正在请求模型（可能需要几秒...）');
+			console.log(`开始链式对话，共 ${dualAiTurns} 轮（A -> B）...`);
+			let chainInput = userText;
+			for (let round = 1; round <= dualAiTurns; round += 1) {
+				const stateA = await agentA.invoke(
+					{ messages: [new HumanMessage(chainInput)] },
+					{ configurable: { thread_id: threadAId } }
+				);
+				const messageA = stateA.messages[stateA.messages.length - 1];
+				const outputA = contentToText(messageA.content);
+				console.log(`A(${aiAName}) [第${round}轮]：${outputA}`);
 
-			const agentState = await agent.invoke(
-				{ messages: [new HumanMessage(userText)] },
-				{ configurable: { thread_id: threadId } }
-			);
-			const aiMessage = agentState.messages[agentState.messages.length - 1];
-			const content = aiMessage.content ? aiMessage.content : String(aiMessage);
+				const stateB = await agentB.invoke(
+					{ messages: [new HumanMessage(outputA)] },
+					{ configurable: { thread_id: threadBId } }
+				);
+				const messageB = stateB.messages[stateB.messages.length - 1];
+				const outputB = contentToText(messageB.content);
+				console.log(`B(${aiBName}) [第${round}轮]：${outputB}`);
 
-			console.log('助手：', content);
+				chainInput = outputB;
+			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			console.error('调用模型失败：', message);
