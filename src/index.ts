@@ -4,7 +4,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { ProxyAgent } from 'undici';
 import { TavilySearchAPIRetriever } from '@langchain/community/retrievers/tavily_search_api';
 import { MemorySaver } from '@langchain/langgraph';
-import { HumanMessage, createAgent, initChatModel, tool } from 'langchain';
+import { HumanMessage, SystemMessage, createAgent, initChatModel, tool } from 'langchain';
 import { SystemMessagePromptTemplate } from '@langchain/core/prompts';
 
 function parseNumber(value: string | undefined, fallback: number): number {
@@ -65,6 +65,8 @@ async function main() {
 	const aiBName = requireEnv('AI_B_NAME');
 	const aiARole = requireEnv('AI_A_ROLE');
 	const aiBRole = requireEnv('AI_B_ROLE');
+	const aiARemark = requireEnv('AI_A_REMARK');
+	const aiBRemark = requireEnv('AI_B_REMARK');
 	let threadAId = `${threadSeed}-A`;
 	let threadBId = `${threadSeed}-B`;
 
@@ -76,6 +78,8 @@ async function main() {
 		console.log('[debug] dualAiTurns:', dualAiTurns);
 		console.log('[debug] aiA:', aiAName, aiARole);
 		console.log('[debug] aiB:', aiBName, aiBRole);
+		console.log('[debug] aiARemark:', aiARemark);
+		console.log('[debug] aiBRemark:', aiBRemark);
 	}
 
 	const proxyAgent = new ProxyAgent(proxyUrl);
@@ -113,20 +117,24 @@ async function main() {
 			description: 'Search the web for recent factual information.'
 		}
 	);
-	const systemPromptTemplate = SystemMessagePromptTemplate.fromTemplate([
-		'你是{name}，角色设定：{role}。',
-		'你正在和另一位 AI 进行链式对话。',
-		'请先理解对方上一句，再输出一段可以推进对话的新内容。',
-		'若涉及实时事实，请调用 tavily_search 后再回答。',
-		'输出保持简洁，不要自称系统提示词。'
-	].join('\n'));
+	const systemPromptTemplate = SystemMessagePromptTemplate.fromTemplate(
+		[
+			'你是{name}，角色设定：{role}，备注：{remark}。',
+			'你正在和另一位 AI 进行链式对话。',
+			'请先理解对方上一句，再输出一段可以推进对话的新内容。',
+			'若涉及实时事实，请调用 tavily_search 后再回答。',
+			'输出保持简洁，不要自称系统提示词。'
+		].join('\n')
+	);
 	const systemPromptA = await systemPromptTemplate.format({
 		name: aiAName,
-		role: aiARole
+		role: aiARole,
+		remark: aiARemark
 	});
 	const systemPromptB = await systemPromptTemplate.format({
 		name: aiBName,
-		role: aiBRole
+		role: aiBRole,
+		remark: aiBRemark
 	});
 	const checkpointer = new MemorySaver();
 	const agentA = createAgent({
@@ -168,16 +176,21 @@ async function main() {
 			console.log(`开始链式对话，共 ${dualAiTurns} 轮（A -> B）...`);
 			let chainInput = userText;
 			for (let round = 1; round <= dualAiTurns; round += 1) {
+				const messageForA =
+					round === 1 ? new SystemMessage(chainInput) : new HumanMessage(chainInput);
 				const stateA = await agentA.invoke(
-					{ messages: [new HumanMessage(chainInput)] },
+					{ messages: [messageForA] },
 					{ configurable: { thread_id: threadAId } }
 				);
 				const messageA = stateA.messages[stateA.messages.length - 1];
 				const outputA = contentToText(messageA.content);
 				console.log(`A(${aiAName}) [第${round}轮]：${outputA}`);
-
+				const messageForB = new SystemMessage(chainInput);
 				const stateB = await agentB.invoke(
-					{ messages: [new HumanMessage(outputA)] },
+					{
+						messages:
+							round === 1 ? [messageForB, new HumanMessage(outputA)] : [new HumanMessage(outputA)]
+					},
 					{ configurable: { thread_id: threadBId } }
 				);
 				const messageB = stateB.messages[stateB.messages.length - 1];
