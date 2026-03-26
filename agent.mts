@@ -1,22 +1,33 @@
 import 'dotenv/config';
 
 import { TavilySearchAPIRetriever } from '@langchain/community/retrievers/tavily_search_api';
-import { tool } from '@langchain/core/tools';
-import { ChatOpenAI } from '@langchain/openai';
 import { ProxyAgent } from 'undici';
 import { MemorySaver } from '@langchain/langgraph';
-import { HumanMessage } from '@langchain/core/messages';
-import { createReactAgent } from '@langchain/langgraph/prebuilt';
+import { HumanMessage, createAgent, initChatModel, tool } from 'langchain';
 
 const apiKey = process.env.API_KEY;
 const model = process.env.MODEL;
 const baseURL = process.env.BASE_URL;
-const temperature = Number.parseFloat(process.env.TEMPERATURE ?? '0');
-const threadId = process.env.THREAD_ID ?? '42';
-const proxyUrl = 'http://127.0.0.1:7897';
+const temperatureText = process.env.TEMPERATURE;
+const threadId = process.env.THREAD_ID;
+const proxyUrl = process.env.PROXY_URL;
+
+if (!temperatureText) {
+	throw new Error('缺少 TEMPERATURE');
+}
+const temperature = Number.parseFloat(temperatureText);
 
 if (!apiKey) {
 	throw new Error('缺少 API_KEY');
+}
+if (!model) {
+	throw new Error('缺少 MODEL');
+}
+if (!threadId) {
+	throw new Error('缺少 THREAD_ID');
+}
+if (!proxyUrl) {
+	throw new Error('缺少 PROXY_URL');
 }
 
 if (!process.env.TAVILY_API_KEY) {
@@ -45,19 +56,20 @@ const tavilySearchTool = tool(
 
 // Define the tools for the agent to use
 const agentTools = [tavilySearchTool];
-const agentModel = new ChatOpenAI({
+const agentModel = await initChatModel(model, {
+	modelProvider: 'openai',
 	apiKey,
-	model,
 	temperature,
-	configuration: baseURL ? { baseURL, fetch: proxyFetch } : undefined
+	baseURL,
+	fetch: proxyFetch
 });
 
 // Initialize memory to persist state between graph runs
 const agentCheckpointer = new MemorySaver();
-const agent = createReactAgent({
-	llm: agentModel,
+const agent = createAgent({
+	model: agentModel,
 	tools: agentTools,
-	checkpointSaver: agentCheckpointer
+	checkpointer: agentCheckpointer
 });
 
 // Now it's time to use!
